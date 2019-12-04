@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
+	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,36 +19,29 @@ import (
 
 const BUFFERSIZE = 1024
 
-func main() {
-
+//connect to server
+func connSrv() (conn net.Conn, err error) {
 	//connect to server socket
-	connection, err := net.Dial("tcp", "192.168.88.10:8081")
+	conn, err = net.Dial("tcp", "192.168.88.11:49999")
 	if err != nil {
-		log.Error().Err(err).Msg("")
+		fmt.Printf("[  ERR ] Server not found\r\n")
 	}
-	defer connection.Close()
+	return conn, err
+}
 
-	fmt.Println("Connected to server, start receiving the file name and file size")
-
-	bufferFileName := make([]byte, 64)
-	bufferFileSize := make([]byte, 10)
-
-	connection.Read(bufferFileSize)
-	fileSize, err := strconv.ParseInt(strings.Trim(string(bufferFileSize), ":"), 10, 64)
+//read firmware version /etc/version
+func compareFwVer() ([]byte, error) {
+	valfw, err := ioutil.ReadFile("/etc/version")
 	if err != nil {
-		log.Error().Err(err).Msg("")
+		return nil, err
 	}
+	v := string(valfw)
+	fmt.Printf("[CLIENT] Board fw: %s\r", v)
+	return valfw, nil
+}
 
-	connection.Read(bufferFileName)
-	fileName := strings.Trim(string(bufferFileName), ":")
-
-	fmt.Println("Firmware:", fileName, ",", "size:", fileSize/1024, "Kb")
-
-	newFile, err := os.Create(fileName)
-	if err != nil {
-		log.Error().Err(err).Msg("")
-	}
-	defer newFile.Close()
+//progress bar
+func progressBar(fileSize int64, connection net.Conn, newFile *os.File, fileName string) {
 
 	var receivedBytes int64
 
@@ -69,6 +66,66 @@ func main() {
 
 	}
 
-	fmt.Println("Received file completely!")
-	fmt.Printf("%s with %v bytes downloaded\n\r", fileName, count)
+	fmt.Printf("[  OK  ] Received file completely!\r\n")
+	fmt.Printf("[  OK  ] %s with %v bytes downloaded\r\n", fileName, count)
+}
+
+//execute and run bash script
+func execBash() {
+	output := exec.Command("./fwu.sh")
+	_, err := output.Output()
+	if err != nil {
+		log.Error().Err(err).Msg("")
+	}
+}
+
+func main() {
+
+	var a, b []byte
+
+	connection, err := connSrv()
+	if err != nil {
+		os.Exit(3)
+	}
+	fmt.Printf("[  OK  ] Connected to server...\r\n")
+	//defer connection.Close()
+
+	bufferFileName := make([]byte, 64)
+	bufferFileSize := make([]byte, 10)
+
+	connection.Read(bufferFileSize)
+	fileSize, err := strconv.ParseInt(strings.Trim(string(bufferFileSize), ":"), 10, 64)
+	if err != nil {
+		log.Error().Err(err).Msg("")
+	}
+
+	connection.Read(bufferFileName)
+	fileName := strings.Trim(string(bufferFileName), ":")
+
+	var re = regexp.MustCompile(`(?m)\d{14}`)
+	var str = string(fileName)
+
+	strarr := re.FindAllString(str, -1)
+	singstr := strings.Join(strarr, " ")
+	bfwNum := []byte(singstr)
+	//compare FW version
+	a = bfwNum
+	s := string(a)
+	fmt.Printf("[  SRV ] Current firmware: %s\r\n", s)
+	b, _ = compareFwVer()
+	if bytes.Compare(a, b) < 0 {
+		fmt.Printf("[CLIENT] Update not required\r\n")
+	} else {
+		fmt.Printf("[CLIENT] Update required\r\n")
+		fmt.Printf("[  SRV ] Firmware: %s, size: %d Kb\r\n", fileName, fileSize/1024)
+		newFile, err := os.Create(fileName)
+		if err != nil {
+			log.Error().Err(err).Msg("")
+		}
+		progressBar(fileSize, connection, newFile, fileName)
+		defer newFile.Close()
+		fmt.Println("Don`t power off board...")
+		fmt.Println("System will reboot after few second...")
+		execBash()
+	}
 }
